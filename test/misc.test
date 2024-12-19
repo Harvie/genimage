@@ -104,6 +104,14 @@ test_expect_success fiptool "fip" "
 	fiptool info images/test.fip
 "
 
+exec_test_set_prereq mdadm
+test_expect_success mdadm "mdraid" "
+	run_genimage_root mdraid.config test.mdraid &&
+	mdadm --examine images/test.mdraid &&
+	mdadm --examine images/test.mdraid | grep 'Checksum.*correct$' &&
+	mdadm --examine images/test.mdraid | grep 'State.*active$'
+"
+
 test_done
 
 # vim: syntax=sh
