@@ -19,6 +19,11 @@ void image_debug(struct image *image, const char *fmt, ...) __attribute__ ((form
 void xasprintf(char **strp, const char *fmt, ...) __attribute__ ((format(printf, 2, 3)));
 void xstrcatf(char **strp, const char *fmt, ...) __attribute__ ((format(printf, 2, 3)));
 
+unsigned long long roundup(unsigned long long value, unsigned long long align);
+unsigned long long rounddown(unsigned long long value, unsigned long long align);
+unsigned long long min_ull(unsigned long long x, unsigned long long y);
+unsigned long long max_ull(unsigned long long x, unsigned long long y);
+
 void disable_rootpath(void);
 const char *imagepath(void);
 const char *inputpath(void);

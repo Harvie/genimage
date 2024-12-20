@@ -42,6 +42,7 @@ https://docs.huihoo.com/doxygen/linux/kernel/3.7/md__p_8h_source.html
 
 #define DATA_OFFSET_SECTORS	(2048)
 #define DATA_OFFSET_BYTES	(DATA_OFFSET_SECTORS*512)
+#define MDRAID_MAGIC		0xa92b4efc
 
 static void random_uuid(__u8 *buf)
 {
@@ -90,54 +91,55 @@ static int mdraid_generate(struct image *image) {
 
 	char *name = cfg_getstr(image->imagesec, "label");
 
-	struct mdp_superblock_1 *sb = xzalloc(sizeof(struct mdp_superblock_1)+max_devices*2);
+	size_t superblock_size = sizeof(struct mdp_superblock_1) + max_devices*2;
+	struct mdp_superblock_1 *sb = xzalloc(superblock_size);
 
 	/* constant array information - 128 bytes */
-	sb->magic = 0xa92b4efc;		/* MD_SB_MAGIC: 0xa92b4efc - little endian */
+	sb->magic = MDRAID_MAGIC;	/* MD_SB_MAGIC: 0xa92b4efc - little endian */
 	sb->major_version = 1;	/* 1 */
 	sb->feature_map = 0; //MD_FEATURE_BITMAP_OFFSET;	/* bit 0 set if 'bitmap_offset' is meaningful */ //TODO: internal bitmap bit is ignored, unless there is correct bitmap with BITMAP_MAGIC in place
 	sb->pad0 = 0;		/* always set to 0 when writing */
 
 	random_uuid(sb->set_uuid);	/* user-space generated. U8[16]*/ //TODO: should we allow user to set this?
-	strncpy(sb->set_name, name, 32); sb->set_name[31]=0;	/* set and interpreted by user-space. CHAR[32] */
-	sb->ctime=time(NULL);	/* lo 40 bits are seconds, top 24 are microseconds or 0*/
+	strncpy(sb->set_name, name, 32); sb->set_name[31] = 0;	/* set and interpreted by user-space. CHAR[32] */
+	sb->ctime = time(NULL) & 0xffffffffff;	/* lo 40 bits are seconds, top 24 are microseconds or 0*/
 
-	sb->level=1;		/* -4 (multipath), -1 (linear), 0,1,4,5 */
-	//sb->layout=2;		/* only for raid5 and raid10 currently */
-	sb->size=(image->size - DATA_OFFSET_BYTES)/512;	/* used size of component devices, in 512byte sectors */
+	sb->level = 1;		/* -4 (multipath), -1 (linear), 0,1,4,5 */
+	//sb->layout = 2;		/* only for raid5 and raid10 currently */
+	sb->size = (image->size - DATA_OFFSET_BYTES)/512;	/* used size of component devices, in 512byte sectors */
 
-	sb->chunksize=0;		/* in 512byte sectors - not used in raid 1 */
-	sb->raid_disks=1;
-	sb->bitmap_offset=8;	/* sectors after start of superblock that bitmap starts
+	sb->chunksize = 0;		/* in 512byte sectors - not used in raid 1 */
+	sb->raid_disks = 1;
+	sb->bitmap_offset = 8;	/* sectors after start of superblock that bitmap starts
 					 * NOTE: signed, so bitmap can be before superblock
 					 * only meaningful of feature_map[0] is set.
 					 */
 
 	/* constant this-device information - 64 bytes */
-	sb->data_offset=DATA_OFFSET_SECTORS;	/* sector start of data, often 0 */
-	sb->data_size=(image->size - DATA_OFFSET_BYTES)/512;	/* sectors in this device that can be used for data */
-	sb->super_offset=8;	/* sector start of this superblock */
+	sb->data_offset = DATA_OFFSET_SECTORS;	/* sector start of data, often 0 */
+	sb->data_size = image->size / 512 - sb->data_offset;	/* sectors in this device that can be used for data */
+	sb->super_offset = 8;	/* sector start of this superblock */
 
-	sb->dev_number=0;	/* permanent identifier of this  device - not role in raid */
-	sb->cnt_corrected_read=0; /* number of read errors that were corrected by re-writing */
+	sb->dev_number = 0;	/* permanent identifier of this  device - not role in raid */
+	sb->cnt_corrected_read = 0; /* number of read errors that were corrected by re-writing */
 	random_uuid(sb->device_uuid); /* user-space setable, ignored by kernel U8[16] */ //TODO: should we allow user to set this?
-	sb->devflags=0;	/* per-device flags.  Only two defined...*/
+	sb->devflags = 0;	/* per-device flags.  Only two defined...*/
 		//#define	WriteMostly1	1	/* mask for writemostly flag in above */
 		//#define	FailFast1	2	/* Should avoid retries and fixups and just fail */
 
 		/* Bad block log.  If there are any bad blocks the feature flag is set.
 		* If offset and size are non-zero, that space is reserved and available
 		*/
-	sb->bblog_shift=9;    /* shift from sectors to block size */ //TODO: not sure why this is 9
-	sb->bblog_size=8; /* number of sectors reserved for list */
-	sb->bblog_offset=16;   /* sector offset from superblock to bblog,
+	sb->bblog_shift = 9;    /* shift from sectors to block size */ //TODO: not sure why this is 9
+	sb->bblog_size = 8; /* number of sectors reserved for list */
+	sb->bblog_offset = 16;   /* sector offset from superblock to bblog,
 			* signed - not unsigned */
 
 	/* array state information - 64 bytes */
-	sb->utime=0;		/* 40 bits second, 24 bits microseconds */
-	sb->events=0;		/* incremented when superblock updated */
-	sb->resync_offset=0;	/* data before this offset (from data_offset) known to be in sync */
-	sb->max_dev=max_devices; /* size of devs[] array to consider */
+	sb->utime = 0;		/* 40 bits second, 24 bits microseconds */
+	sb->events = 0;		/* incremented when superblock updated */
+	sb->resync_offset = 0;	/* data before this offset (from data_offset) known to be in sync */
+	sb->max_dev = max_devices; /* size of devs[] array to consider */
 	//__u8	pad3[64-32];	/* set to 0 when writing */
 
 	/* device state information. Indexed by dev_number.
@@ -150,18 +152,18 @@ static int mdraid_generate(struct image *image) {
 
 
 	//Calculate checksum
-	sb->sb_csum=calc_sb_1_csum(sb);
+	sb->sb_csum = calc_sb_1_csum(sb);
 
 
 	//construct image file
 	int ret;
 	ret = prepare_image(image, image->size);
-	if(ret) return ret;
-	ret = insert_data(image, sb, imageoutfile(image), sizeof(struct mdp_superblock_1)+max_devices*2, 8*512);
-	if(ret) return ret;
-	if(img_in) {
+	if (ret) return ret;
+	ret = insert_data(image, sb, imageoutfile(image), superblock_size, 8*512);
+	if (ret) return ret;
+	if (img_in) {
 		ret = insert_image(image, img_in, image->size-DATA_OFFSET_BYTES, DATA_OFFSET_BYTES, 0);
-		if(ret) return ret;
+		if (ret) return ret;
 	}
 
 	free(sb);
@@ -174,7 +176,7 @@ static int mdraid_setup(struct image *image, cfg_t *cfg) {
 
 	int raid_level = cfg_getint(image->imagesec, "level");
 
-	if(raid_level != 1) {
+	if (raid_level != 1) {
 		image_error(image, "MDRAID Currently only supporting raid level 1 (mirror)!\n");
 		return 1;
 	}
@@ -183,31 +185,28 @@ static int mdraid_setup(struct image *image, cfg_t *cfg) {
 	struct image *img_in = NULL;
 	struct partition *part;
 	list_for_each_entry(part, &image->partitions, list) {
-		if(strcmp(part->name, "data")) {
+		if (strcmp(part->name, "data")) {
 			image_info(image, "MDRAID partition has to be called 'data' instead of '%s'\n", part->name);
 		} else {
-			if(img_in) {
+			if (img_in) {
 				image_error(image, "MDRAID cannot contain more than one data partition!\n");
 				return 2;
 			}
-			if(part->image) {
+			if (part->image) {
 				image_info(image, "MDRAID using data from [%s]: %s\n", part->name, part->image);
 				img_in = image_get(part->image);
-				if(image->size < (img_in->size + DATA_OFFSET_BYTES)) image->size = (img_in->size + DATA_OFFSET_BYTES);
+				if (image->size < (img_in->size + DATA_OFFSET_BYTES)) image->size = (img_in->size + DATA_OFFSET_BYTES);
 			}
 		}
 	}
-	if(!img_in) {
+	if (!img_in) {
 		image_info(image, "MDRAID is created without data.\n");
 	}
 	image->handler_priv = img_in;
 
 
 	//Make sure size is aligned (should be divisible by 8 sectors to keep 4kB alignment)
-	int align = 8*512;
-	if(image->size % align) {
-		image->size += align-(image->size % align);
-	}
+	image->size = roundup(image->size, 8*512);
 
 	return 0;
 }
