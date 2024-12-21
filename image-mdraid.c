@@ -44,6 +44,7 @@ https://docs.huihoo.com/doxygen/linux/kernel/3.7/md__p_8h_source.html
 #define DATA_OFFSET_BYTES	(DATA_OFFSET_SECTORS*512)
 #define MDRAID_MAGIC		0xa92b4efc
 
+/*
 static void random_uuid(__u8 *buf)
 {
 	__u32 r[4];
@@ -51,6 +52,7 @@ static void random_uuid(__u8 *buf)
 		r[i] = random();
 	memcpy(buf, r, 16);
 }
+*/
 
 static unsigned int calc_sb_1_csum(struct mdp_superblock_1 * sb)
 {
@@ -100,9 +102,18 @@ static int mdraid_generate(struct image *image) {
 	sb->feature_map = 0; //MD_FEATURE_BITMAP_OFFSET;	/* bit 0 set if 'bitmap_offset' is meaningful */ //TODO: internal bitmap bit is ignored, unless there is correct bitmap with BITMAP_MAGIC in place
 	sb->pad0 = 0;		/* always set to 0 when writing */
 
-	random_uuid(sb->set_uuid);	/* user-space generated. U8[16]*/ //TODO: should we allow user to set this?
+	char *raid_uuid = cfg_getstr(image->imagesec, "raid-uuid");
+	if (!raid_uuid) raid_uuid = uuid_random();
+	uuid_parse(raid_uuid, sb->set_uuid);  /* user-space generated. U8[16]*/
+
 	strncpy(sb->set_name, name, 32); sb->set_name[31] = 0;	/* set and interpreted by user-space. CHAR[32] */
-	sb->ctime = time(NULL) & 0xffffffffff;	/* lo 40 bits are seconds, top 24 are microseconds or 0*/
+
+	long int timestamp = cfg_getint(image->imagesec, "timestamp");
+	if (timestamp >= 0) {
+		sb->ctime = timestamp & 0xffffffffff;
+	} else {
+		sb->ctime = time(NULL) & 0xffffffffff;	/* lo 40 bits are seconds, top 24 are microseconds or 0*/
+	}
 
 	sb->level = 1;		/* -4 (multipath), -1 (linear), 0,1,4,5 */
 	//sb->layout = 2;		/* only for raid5 and raid10 currently */
@@ -122,7 +133,11 @@ static int mdraid_generate(struct image *image) {
 
 	sb->dev_number = 0;	/* permanent identifier of this  device - not role in raid */
 	sb->cnt_corrected_read = 0; /* number of read errors that were corrected by re-writing */
-	random_uuid(sb->device_uuid); /* user-space setable, ignored by kernel U8[16] */ //TODO: should we allow user to set this?
+
+	char *disk_uuid = cfg_getstr(image->imagesec, "disk-uuid");
+	if (!disk_uuid) disk_uuid = uuid_random();
+	uuid_parse(disk_uuid, sb->device_uuid);  /* user-space setable, ignored by kernel U8[16] */
+
 	sb->devflags = 0;	/* per-device flags.  Only two defined...*/
 		//#define	WriteMostly1	1	/* mask for writemostly flag in above */
 		//#define	FailFast1	2	/* Should avoid retries and fixups and just fail */
@@ -181,7 +196,6 @@ static int mdraid_setup(struct image *image, cfg_t *cfg) {
 		return 1;
 	}
 
-
 	struct image *img_in = NULL;
 	struct partition *part;
 	list_for_each_entry(part, &image->partitions, list) {
@@ -214,6 +228,9 @@ static int mdraid_setup(struct image *image, cfg_t *cfg) {
 static cfg_opt_t mdraid_opts[] = {
 	CFG_STR("label", "localhost:42", CFGF_NONE),
 	CFG_INT("level", 1, CFGF_NONE),
+	CFG_INT("timestamp", -1, CFGF_NONE),
+	CFG_STR("raid-uuid", NULL, CFGF_NONE),
+	CFG_STR("disk-uuid", NULL, CFGF_NONE),
 	CFG_END()
 };
 
