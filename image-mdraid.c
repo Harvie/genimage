@@ -43,6 +43,8 @@ https://docs.huihoo.com/doxygen/linux/kernel/3.7/md__p_8h_source.html
 #define DATA_OFFSET_SECTORS	(2048)
 #define DATA_OFFSET_BYTES	(DATA_OFFSET_SECTORS*512)
 #define MDRAID_MAGIC		0xa92b4efc
+#define MDRAID_ALIGN_BYTES	8*512	//(should be divisible by 8 sectors to keep 4kB alignment)
+
 
 /*
 static void random_uuid(__u8 *buf)
@@ -177,7 +179,7 @@ static int mdraid_generate(struct image *image) {
 	ret = insert_data(image, sb, imageoutfile(image), superblock_size, 8*512);
 	if (ret) return ret;
 	if (img_in) {
-		ret = insert_image(image, img_in, image->size-DATA_OFFSET_BYTES, DATA_OFFSET_BYTES, 0);
+		ret = insert_image(image, img_in, img_in->size, DATA_OFFSET_BYTES, 0);
 		if (ret) return ret;
 	}
 
@@ -209,7 +211,12 @@ static int mdraid_setup(struct image *image, cfg_t *cfg) {
 			if (part->image) {
 				image_info(image, "MDRAID using data from [%s]: %s\n", part->name, part->image);
 				img_in = image_get(part->image);
-				if (image->size < (img_in->size + DATA_OFFSET_BYTES)) image->size = (img_in->size + DATA_OFFSET_BYTES);
+				if (image->size == 0)
+					image->size = roundup(img_in->size + DATA_OFFSET_BYTES, MDRAID_ALIGN_BYTES);
+				if (image->size < (img_in->size + DATA_OFFSET_BYTES)) {
+					image_error(image, "MDRAID image too small to fit %s\n", part->image);
+					return 3;
+				}
 			}
 		}
 	}
@@ -219,8 +226,11 @@ static int mdraid_setup(struct image *image, cfg_t *cfg) {
 	image->handler_priv = img_in;
 
 
-	//Make sure size is aligned (should be divisible by 8 sectors to keep 4kB alignment)
-	image->size = roundup(image->size, 8*512);
+	//Make sure size is aligned
+	if (image->size != roundup(image->size, MDRAID_ALIGN_BYTES)) {
+		image_error(image, "MDRAID image size has to be aligned to %d bytes!\n", MDRAID_ALIGN_BYTES);
+		return 4;
+	}
 
 	return 0;
 }
