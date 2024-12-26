@@ -107,9 +107,9 @@ test_expect_success fiptool "fip" "
 exec_test_set_prereq mdadm
 test_expect_success mdadm "mdraid" "
 	run_genimage_root mdraid.config test.mdraid &&
-	mdadm --examine images/test.mdraid &&
-	mdadm --examine images/test.mdraid | grep 'Checksum.*correct$' &&
-	mdadm --examine images/test.mdraid | grep 'State.*active$'
+	LANG=C mdadm --examine images/test.mdraid | tee images/test.mdraid.txt &&
+	grep 'Checksum.*correct$' images/test.mdraid.txt &&
+	grep 'State.*active$' images/test.mdraid.txt
 "
 
 test_done
