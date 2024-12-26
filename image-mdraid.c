@@ -91,9 +91,14 @@ static unsigned int calc_sb_1_csum(struct mdp_superblock_1 * sb)
 static int mdraid_generate(struct image *image) {
 	struct image *img_in = image->handler_priv;
 
-	int max_devices = 1;
-
 	char *name = cfg_getstr(image->imagesec, "label");
+	__le16 max_devices = cfg_getint(image->imagesec, "devices");
+	__le16 role = cfg_getint(image->imagesec, "role");
+
+	if (role >= max_devices) {
+		image_error(image, "MDRAID role of this image has to be lower than total number of devices (roles are counted from 0).\n");
+		return 5;
+	}
 
 	size_t superblock_size = sizeof(struct mdp_superblock_1) + max_devices*2;
 	struct mdp_superblock_1 *sb = xzalloc(superblock_size);
@@ -122,7 +127,7 @@ static int mdraid_generate(struct image *image) {
 	sb->size = (image->size - DATA_OFFSET_BYTES)/512;	/* used size of component devices, in 512byte sectors */
 
 	sb->chunksize = 0;		/* in 512byte sectors - not used in raid 1 */
-	sb->raid_disks = 1;
+	sb->raid_disks = max_devices;
 	sb->bitmap_offset = 8;	/* sectors after start of superblock that bitmap starts
 					 * NOTE: signed, so bitmap can be before superblock
 					 * only meaningful of feature_map[0] is set.
@@ -133,7 +138,7 @@ static int mdraid_generate(struct image *image) {
 	sb->data_size = image->size / 512 - sb->data_offset;	/* sectors in this device that can be used for data */
 	sb->super_offset = 8;	/* sector start of this superblock */
 
-	sb->dev_number = 0;	/* permanent identifier of this  device - not role in raid */
+	sb->dev_number = role;	/* permanent identifier of this  device - not role in raid. But there is no reason not to have dev_number and role equal when creating fresh array. */
 	sb->cnt_corrected_read = 0; /* number of read errors that were corrected by re-writing */
 
 	char *disk_uuid = cfg_getstr(image->imagesec, "disk-uuid");
@@ -153,7 +158,7 @@ static int mdraid_generate(struct image *image) {
 			* signed - not unsigned */
 
 	/* array state information - 64 bytes */
-	sb->utime = 0;		/* 40 bits second, 24 bits microseconds */
+	sb->utime = sb->ctime;	/* 40 bits second, 24 bits microseconds */
 	sb->events = 0;		/* incremented when superblock updated */
 	sb->resync_offset = 0;	/* data before this offset (from data_offset) known to be in sync */
 	sb->max_dev = max_devices; /* size of devs[] array to consider */
@@ -165,8 +170,11 @@ static int mdraid_generate(struct image *image) {
 	 * into the 'roles' value.  If a device is spare or faulty, then it doesn't
 	 * have a meaningful role.
 	 */
-	//__le16	dev_roles[];	/* role in array, or 0xffff for a spare, or 0xfffe for faulty */
-
+	__le16	*dev_roles = (__le16 *) ((char *) sb + sizeof(struct mdp_superblock_1)); /* role in array, or 0xffff for a spare, or 0xfffe for faulty */
+	//memset(dev_roles, 0xFF, max_devices*2); //All devices in array are set as inactive initialy
+	for(int i = 0; i<max_devices; i++) { //All devices are assigned roles equal to their dev_number initialy
+		dev_roles[i] = i; //Assign active role to all devices
+	}
 
 	//Calculate checksum
 	sb->sb_csum = calc_sb_1_csum(sb);
@@ -238,6 +246,8 @@ static int mdraid_setup(struct image *image, cfg_t *cfg) {
 static cfg_opt_t mdraid_opts[] = {
 	CFG_STR("label", "localhost:42", CFGF_NONE),
 	CFG_INT("level", 1, CFGF_NONE),
+	CFG_INT("devices", 1, CFGF_NONE),
+	CFG_INT("role", 0, CFGF_NONE),
 	CFG_INT("timestamp", -1, CFGF_NONE),
 	CFG_STR("raid-uuid", NULL, CFGF_NONE),
 	CFG_STR("disk-uuid", NULL, CFGF_NONE),
