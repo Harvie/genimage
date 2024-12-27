@@ -42,19 +42,57 @@ https://docs.huihoo.com/doxygen/linux/kernel/3.7/md__p_8h_source.html
 
 #define DATA_OFFSET_SECTORS	(2048)
 #define DATA_OFFSET_BYTES	(DATA_OFFSET_SECTORS*512)
-#define MDRAID_MAGIC		0xa92b4efc
 #define MDRAID_ALIGN_BYTES	8*512	//(should be divisible by 8 sectors to keep 4kB alignment)
 
 
 /*
-static void random_uuid(__u8 *buf)
-{
-	__u32 r[4];
-	for (int i = 0; i < 4; i++)
-		r[i] = random();
-	memcpy(buf, r, 16);
-}
-*/
+ * bitmap structures:
+ * Taken from Linux kernel drivers/md/md-bitmap.h
+ * (Currently it's missing from linux-libc-dev debian package, so cannot be included)
+ */
+
+#define BITMAP_MAGIC 0x6d746962
+
+/* use these for bitmap->flags and bitmap->sb->state bit-fields */
+enum bitmap_state {
+	BITMAP_STALE	   = 1,  /* the bitmap file is out of date or had -EIO */
+	BITMAP_WRITE_ERROR = 2, /* A write error has occurred */
+	BITMAP_HOSTENDIAN  =15,
+};
+
+/* the superblock at the front of the bitmap file -- little endian */
+typedef struct bitmap_super_s {
+	__le32 magic;        /*  0  BITMAP_MAGIC */
+	__le32 version;      /*  4  the bitmap major for now, could change... */
+	__u8  uuid[16];      /*  8  128 bit uuid - must match md device uuid */
+	__le64 events;       /* 24  event counter for the bitmap (1)*/
+	__le64 events_cleared;/*32  event counter when last bit cleared (2) */
+	__le64 sync_size;    /* 40  the size of the md device's sync range(3) */
+	__le32 state;        /* 48  bitmap state information */
+	__le32 chunksize;    /* 52  the bitmap chunk size in bytes */
+	__le32 daemon_sleep; /* 56  seconds between disk flushes */
+	__le32 write_behind; /* 60  number of outstanding write-behind writes */
+	__le32 sectors_reserved; /* 64 number of 512-byte sectors that are
+				  * reserved for the bitmap. */
+	__le32 nodes;        /* 68 the maximum number of nodes in cluster. */
+	__u8 cluster_name[64]; /* 72 cluster name to which this md belongs */
+	__u8  pad[256 - 136]; /* set to zero */
+} bitmap_super_t;
+
+/* notes:
+ * (1) This event counter is updated before the eventcounter in the md superblock
+ *    When a bitmap is loaded, it is only accepted if this event counter is equal
+ *    to, or one greater than, the event counter in the superblock.
+ * (2) This event counter is updated when the other one is *if*and*only*if* the
+ *    array is not degraded.  As bits are not cleared when the array is degraded,
+ *    this represents the last time that any bits were cleared.
+ *    If a device is being added that has an event count with this value or
+ *    higher, it is accepted as conforming to the bitmap.
+ * (3)This is the number of sectors represented by the bitmap, and is the range that
+ *    resync happens across.  For raid1 and raid5/6 it is the size of individual
+ *    devices.  For raid10 it is the size of the array.
+ */
+
 
 static unsigned int calc_sb_1_csum(struct mdp_superblock_1 * sb)
 {
@@ -63,7 +101,7 @@ static unsigned int calc_sb_1_csum(struct mdp_superblock_1 * sb)
 	int size = sizeof(*sb) + __le32_to_cpu(sb->max_dev)*2;
 	unsigned int *isuper = (unsigned int*)sb;
 
-	/* make sure I can count... (needs include cstddef) */
+	/* Just for debug. To make sure I can count... (needs include cstddef) */
 	/*
 	if (offsetof(struct mdp_superblock_1,data_offset) != 128 ||
 	    offsetof(struct mdp_superblock_1, utime) != 192 ||
@@ -95,16 +133,22 @@ static int mdraid_generate(struct image *image) {
 	__le16 max_devices = cfg_getint(image->imagesec, "devices");
 	__le16 role = cfg_getint(image->imagesec, "role");
 
+	if (role > MD_DISK_ROLE_MAX) {
+		image_error(image, "MDRAID role has to be >= 0 and <= %d.\n", MD_DISK_ROLE_MAX);
+		return 6;
+	}
+
 	if (role >= max_devices) {
-		image_error(image, "MDRAID role of this image has to be lower than total number of devices (roles are counted from 0).\n");
+		image_error(image, "MDRAID role of this image has to be lower than total number of %d devices (roles are counted from 0).\n", max_devices);
 		return 5;
 	}
 
 	size_t superblock_size = sizeof(struct mdp_superblock_1) + max_devices*2;
 	struct mdp_superblock_1 *sb = xzalloc(superblock_size);
+	bitmap_super_t bsb = {0};
 
 	/* constant array information - 128 bytes */
-	sb->magic = MDRAID_MAGIC;	/* MD_SB_MAGIC: 0xa92b4efc - little endian */
+	sb->magic = MD_SB_MAGIC;	/* MD_SB_MAGIC: 0xa92b4efc - little endian. This is actualy just char string saying "bitm" :-) */
 	sb->major_version = 1;	/* 1 */
 	sb->feature_map = 0; //MD_FEATURE_BITMAP_OFFSET;	/* bit 0 set if 'bitmap_offset' is meaningful */ //TODO: internal bitmap bit is ignored, unless there is correct bitmap with BITMAP_MAGIC in place
 	sb->pad0 = 0;		/* always set to 0 when writing */
@@ -135,7 +179,7 @@ static int mdraid_generate(struct image *image) {
 
 	/* constant this-device information - 64 bytes */
 	sb->data_offset = DATA_OFFSET_SECTORS;	/* sector start of data, often 0 */
-	sb->data_size = image->size / 512 - sb->data_offset;	/* sectors in this device that can be used for data */
+	sb->data_size = sb->size;	/* sectors in this device that can be used for data */
 	sb->super_offset = 8;	/* sector start of this superblock */
 
 	sb->dev_number = role;	/* permanent identifier of this  device - not role in raid. But there is no reason not to have dev_number and role equal when creating fresh array. */
@@ -176,16 +220,39 @@ static int mdraid_generate(struct image *image) {
 		dev_roles[i] = i; //Assign active role to all devices
 	}
 
-	//Calculate checksum
+	//Calculate superblock checksum
 	sb->sb_csum = calc_sb_1_csum(sb);
 
+	//Prepare bitmap superblock (bitmaps don't have checksums for performance reasons)
+	bsb.magic = BITMAP_MAGIC;        /*  0  BITMAP_MAGIC */
+	bsb.version = 4;      /* v4 is compatible with mdraid v1.2,   4  the bitmap major for now, could change... */ //FIXME: validate this!!!
+	memcpy(bsb.uuid, sb->device_uuid, sizeof(bsb.uuid));	/*  8  128 bit uuid - must match md device uuid */
+	//bsb.events = 0;       /* 24  event counter for the bitmap (1)*/
+	//bsb.events_cleared = 0;/*32  event counter when last bit cleared (2) */
+	bsb.sync_size = sb->data_size;    /* 40  the size of the md device's sync range(3) */
+	//bsb.state = 0;        /* 48  bitmap state information */
+	///bsb.chunksize;    /* 52  the bitmap chunk size in bytes */
+	bsb.daemon_sleep = 5; /* 5 is considered safe default. 56  seconds between disk flushes */
+	//bsb.write_behind = 0; /* 60  number of outstanding write-behind writes */
+	///bsb.sectors_reserved; /* 64 number of 512-byte sectors that are reserved for the bitmap. */
+	//bsb.nodes;        /* 68 the maximum number of nodes in cluster. */
+	//bsb.cluster_name[64]; /* 72 cluster name to which this md belongs */
+	//__u8  pad[256 - 136]; /* set to zero */
 
-	//construct image file
+
+	//Construct image file
 	int ret;
 	ret = prepare_image(image, image->size);
 	if (ret) return ret;
-	ret = insert_data(image, sb, imageoutfile(image), superblock_size, 8*512);
+	//Write superblock
+	ret = insert_data(image, sb, imageoutfile(image), superblock_size, sb->super_offset * 512);
 	if (ret) return ret;
+	//Write bitmap
+	if ( sb->feature_map & MD_FEATURE_BITMAP_OFFSET ) {
+		ret = insert_data(image, &bsb, imageoutfile(image), sizeof(bsb), (sb->super_offset + sb->bitmap_offset) * 512);
+		if (ret) return ret;
+	}
+	//Write data
 	if (img_in) {
 		ret = insert_image(image, img_in, img_in->size, DATA_OFFSET_BYTES, 0);
 		if (ret) return ret;
