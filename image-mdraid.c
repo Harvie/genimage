@@ -18,6 +18,7 @@
 
 MDRAID Superblock generator
 This should create valid mdraid superblock for raid1 with 1 device (more devices can be added once mounted).
+Unlike mdadm this works completely in userspace and does not need kernel to create the ondisk structures.
 It is still very basic, but following seems to be working:
 
 mdadm --examine test.img
@@ -42,6 +43,7 @@ https://docs.huihoo.com/doxygen/linux/kernel/3.7/md__p_8h_source.html
 
 #define DATA_OFFSET_SECTORS	(2048)
 #define DATA_OFFSET_BYTES	(DATA_OFFSET_SECTORS*512)
+#define BITMAP_SECTORS_MAX	256
 #define MDRAID_ALIGN_BYTES	8*512	//(should be divisible by 8 sectors to keep 4kB alignment)
 
 
@@ -150,7 +152,7 @@ static int mdraid_generate(struct image *image) {
 	/* constant array information - 128 bytes */
 	sb->magic = MD_SB_MAGIC;	/* MD_SB_MAGIC: 0xa92b4efc - little endian. This is actualy just char string saying "bitm" :-) */
 	sb->major_version = 1;	/* 1 */
-	sb->feature_map = 0; //MD_FEATURE_BITMAP_OFFSET;	/* bit 0 set if 'bitmap_offset' is meaningful */ //TODO: internal bitmap bit is ignored, unless there is correct bitmap with BITMAP_MAGIC in place
+	sb->feature_map = MD_FEATURE_BITMAP_OFFSET;	/* bit 0 set if 'bitmap_offset' is meaningful */ //TODO: internal bitmap bit is ignored, unless there is correct bitmap with BITMAP_MAGIC in place
 	sb->pad0 = 0;		/* always set to 0 when writing */
 
 	char *raid_uuid = cfg_getstr(image->imagesec, "raid-uuid");
@@ -198,8 +200,7 @@ static int mdraid_generate(struct image *image) {
 		*/
 	sb->bblog_shift = 9;    /* shift from sectors to block size */ //TODO: not sure why this is 9
 	sb->bblog_size = 8; /* number of sectors reserved for list */
-	sb->bblog_offset = 16;   /* sector offset from superblock to bblog,
-			* signed - not unsigned */
+	sb->bblog_offset = sb->bitmap_offset+BITMAP_SECTORS_MAX+8;   /* sector offset from superblock to bblog, signed - not unsigned */
 
 	/* array state information - 64 bytes */
 	sb->utime = sb->ctime;	/* 40 bits second, 24 bits microseconds */
@@ -225,20 +226,25 @@ static int mdraid_generate(struct image *image) {
 
 	//Prepare bitmap superblock (bitmaps don't have checksums for performance reasons)
 	bsb.magic = BITMAP_MAGIC;        /*  0  BITMAP_MAGIC */
-	bsb.version = 4;      /* v4 is compatible with mdraid v1.2,   4  the bitmap major for now, could change... */ //FIXME: validate this!!!
-	memcpy(bsb.uuid, sb->device_uuid, sizeof(bsb.uuid));	/*  8  128 bit uuid - must match md device uuid */
+	bsb.version = 4;      /* v4 is compatible with mdraid v1.2,   4  the bitmap major for now, could change... */
+	memcpy(bsb.uuid, sb->set_uuid, sizeof(bsb.uuid));	/*  8  128 bit uuid - must match md device uuid */
 	//bsb.events = 0;       /* 24  event counter for the bitmap (1)*/
 	//bsb.events_cleared = 0;/*32  event counter when last bit cleared (2) */
 	bsb.sync_size = sb->data_size;    /* 40  the size of the md device's sync range(3) */
 	//bsb.state = 0;        /* 48  bitmap state information */
-	///bsb.chunksize;    /* 52  the bitmap chunk size in bytes */
+	bsb.chunksize = 64*1024*1024; /* 52  the bitmap chunk size in bytes, 64MB is default on linux */
 	bsb.daemon_sleep = 5; /* 5 is considered safe default. 56  seconds between disk flushes */
 	//bsb.write_behind = 0; /* 60  number of outstanding write-behind writes */
-	///bsb.sectors_reserved; /* 64 number of 512-byte sectors that are reserved for the bitmap. */
+	bsb.sectors_reserved = roundup(bsb.sync_size / bsb.chunksize, 8); /* 64 number of 512-byte sectors that are reserved for the bitmap. */
 	//bsb.nodes;        /* 68 the maximum number of nodes in cluster. */
 	//bsb.cluster_name[64]; /* 72 cluster name to which this md belongs */
 	//__u8  pad[256 - 136]; /* set to zero */
 
+	//Increase bitmap chunk size till we fit in sectors max
+	while(bsb.sectors_reserved > BITMAP_SECTORS_MAX) {
+		bsb.chunksize *= 2;
+		bsb.sectors_reserved = roundup(bsb.sync_size / bsb.chunksize, 8);
+	}
 
 	//Construct image file
 	int ret;

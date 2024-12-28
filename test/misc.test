@@ -109,7 +109,9 @@ test_expect_success mdadm "mdraid" "
 	run_genimage_root mdraid.config test.mdraid &&
 	LANG=C mdadm --examine images/test.mdraid | tee images/test.mdraid.txt &&
 	grep 'Checksum.*correct$' images/test.mdraid.txt &&
-	grep 'State.*active$' images/test.mdraid.txt
+	grep 'State.*active$' images/test.mdraid.txt &&
+	grep 'Internal Bitmap.*sectors' images/test.mdraid.txt &&
+	grep 'Bad Block Log.*entries available' images/test.mdraid.txt
 "
 
 test_done
