@@ -284,29 +284,26 @@ static int mdraid_setup(struct image *image, cfg_t *cfg) {
 		return 1;
 	}
 
+	//Find data image to be put inside the array
 	struct image *img_in = NULL;
-	struct partition *part;
-	list_for_each_entry(part, &image->partitions, list) {
-		if (strcmp(part->name, "data")) {
-			image_info(image, "MDRAID partition has to be called 'data' instead of '%s'\n", part->name);
-		} else {
-			if (img_in) {
-				image_error(image, "MDRAID cannot contain more than one data partition!\n");
-				return 2;
-			}
-			if (part->image) {
-				image_info(image, "MDRAID using data from [%s]: %s\n", part->name, part->image);
-				img_in = image_get(part->image);
-				if (image->size == 0)
-					image->size = roundup(img_in->size + DATA_OFFSET_BYTES, MDRAID_ALIGN_BYTES);
-				if (image->size < (img_in->size + DATA_OFFSET_BYTES)) {
-					image_error(image, "MDRAID image too small to fit %s\n", part->image);
-					return 3;
-				}
+	char *src = cfg_getstr(image->imagesec, "image");
+	if(src) {
+		struct partition *part;
+		part = xzalloc(sizeof *part);
+		part->image = src;
+		list_add_tail(&part->list, &image->partitions);
+
+		if (part->image) {
+			image_info(image, "MDRAID using data from: %s\n", part->image);
+			img_in = image_get(part->image);
+			if (image->size == 0)
+				image->size = roundup(img_in->size + DATA_OFFSET_BYTES, MDRAID_ALIGN_BYTES);
+			if (image->size < (img_in->size + DATA_OFFSET_BYTES)) {
+				image_error(image, "MDRAID image too small to fit %s\n", part->image);
+				return 3;
 			}
 		}
-	}
-	if (!img_in) {
+	} else {
 		image_info(image, "MDRAID is created without data.\n");
 	}
 	image->handler_priv = img_in;
@@ -329,6 +326,7 @@ static cfg_opt_t mdraid_opts[] = {
 	CFG_INT("timestamp", -1, CFGF_NONE),
 	CFG_STR("raid-uuid", NULL, CFGF_NONE),
 	CFG_STR("disk-uuid", NULL, CFGF_NONE),
+	CFG_STR("image", NULL, CFGF_NONE),
 	CFG_END()
 };
 
