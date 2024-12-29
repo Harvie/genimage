@@ -46,6 +46,8 @@ https://docs.huihoo.com/doxygen/linux/kernel/3.7/md__p_8h_source.html
 #define BITMAP_SECTORS_MAX	256
 #define MDRAID_ALIGN_BYTES	8*512	//(should be divisible by 8 sectors to keep 4kB alignment)
 
+static time_t mdraid_time = 0; //Array creation timestamp has to be identical across all the raid members, so we share it between invocations
+
 
 /*
  * bitmap structures:
@@ -165,7 +167,7 @@ static int mdraid_generate(struct image *image) {
 	if (timestamp >= 0) {
 		sb->ctime = timestamp & 0xffffffffff;
 	} else {
-		sb->ctime = time(NULL) & 0xffffffffff;	/* lo 40 bits are seconds, top 24 are microseconds or 0*/
+		sb->ctime = mdraid_time & 0xffffffffff;	/* lo 40 bits are seconds, top 24 are microseconds or 0*/
 	}
 
 	sb->level = 1;		/* -4 (multipath), -1 (linear), 0,1,4,5 */
@@ -270,7 +272,10 @@ static int mdraid_generate(struct image *image) {
 }
 
 static int mdraid_setup(struct image *image, cfg_t *cfg) {
-	srand(time(NULL)); //TODO: Should we seed UUID in more unique way?
+	if(!mdraid_time) {
+		mdraid_time = time(NULL);
+		srandom(mdraid_time); //For UUID generation
+	}
 
 	int raid_level = cfg_getint(image->imagesec, "level");
 
