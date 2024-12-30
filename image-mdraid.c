@@ -50,10 +50,10 @@ static time_t mdraid_time = 0; //Array creation timestamp has to be identical ac
 /*
  * bitmap structures:
  * Taken from Linux kernel drivers/md/md-bitmap.h
- * (Currently it's missing from linux-libc-dev debian package, so cannot be included)
+ * (Currently it's missing from linux-libc-dev debian package, so cannot be simply included)
  */
 
-#define BITMAP_MAGIC 0x6d746962
+#define BITMAP_MAGIC 0x6d746962 /* This is actualy just char string saying "bitm" :-) */
 
 /* use these for bitmap->flags and bitmap->sb->state bit-fields */
 enum bitmap_state {
@@ -95,11 +95,15 @@ typedef struct bitmap_super_s {
  *    devices.  For raid10 it is the size of the array.
  */
 
+
+//This structure is used to store mdraid state data in handler_priv
 typedef struct mdraid_img_s {
-	struct image *img_data;
-	struct image *img_inherit;
-	struct mdp_superblock_1 *sb;
-	bitmap_super_t bsb;
+	struct partition img_data_part; //Partition of data to be imported to raid
+	struct partition img_parent_part; //Partition of parent raid image (we can inherit config from it)
+	struct image *img_data; //Images for aforementioned partitions
+	struct image *img_parent; //Dtto
+	struct mdp_superblock_1 *sb; //Actual mdraid superblock that is gonna be stored on disk
+	bitmap_super_t bsb; //Actual bitmap superblock that is gonna be stored on disk
 	__le16 last_role; //This is counter used by slave devices to take roles
 } mdraid_img_t;
 
@@ -120,6 +124,7 @@ static unsigned int calc_sb_1_csum(struct mdp_superblock_1 * sb)
 	}
 	*/
 
+	//Temporarily set checksum in struct to 0 while remembering original value
 	disk_csum = sb->sb_csum;
 	sb->sb_csum = 0;
 	newcsum = 0;
@@ -132,26 +137,28 @@ static unsigned int calc_sb_1_csum(struct mdp_superblock_1 * sb)
 		newcsum += __le16_to_cpu(*(unsigned short*) isuper);
 
 	csum = (newcsum & 0xffffffff) + (newcsum >> 32);
-	sb->sb_csum = disk_csum;
+	sb->sb_csum = disk_csum; //Set checksum in struct back to original value
 	return __cpu_to_le32(csum);
 }
 
 static int mdraid_generate(struct image *image) {
 	mdraid_img_t *md = image->handler_priv;
-	mdraid_img_t *mdi = NULL; //Inheriting from this if not NULL
+	mdraid_img_t *mdp = NULL; //Inheriting from this parent if not NULL
 	__le16 max_devices;
 
-	if (md->img_inherit) {
-		mdi = md->img_inherit->handler_priv;
-		max_devices = mdi->sb->raid_disks;
+	//Determine max_devices while considering possibility of inheritance from other image
+	if (md->img_parent) {
+		mdp = md->img_parent->handler_priv;
+		max_devices = mdp->sb->raid_disks;
 	} else {
 		max_devices = cfg_getint(image->imagesec, "devices");
 	}
 
+	//Determine role of this device in array
 	__le16 role = cfg_getint(image->imagesec, "role");
-	if (cfg_getint(image->imagesec, "role") == -1) { //If role is -1 it should be autoassigned to inheriting devices
-		if (mdi) {
-			role = ++mdi->last_role; //Take role from master and increment its counter
+	if (cfg_getint(image->imagesec, "role") == -1) { //If role is -1 it should be autoassigned to parenting devices
+		if (mdp) {
+			role = ++mdp->last_role; //Take role from master and increment its counter
 		} else {
 			role = 0; //Master has role of 0
 		}
@@ -173,14 +180,17 @@ static int mdraid_generate(struct image *image) {
 	struct mdp_superblock_1 *sb = md->sb = xzalloc(superblock_size);
 	bitmap_super_t *bsb = &md->bsb;
 
-	if (mdi) {
-		memcpy(md->sb,  mdi->sb,  superblock_size);
-		//memcpy(&md->bsb, &mdi->bsb, sizeof(bitmap_super_t));
+	if (mdp) {
+		//We are inheriting the superblock in this case
+		memcpy(md->sb,  mdp->sb,  superblock_size);
+		//memcpy(&md->bsb, &mdp->bsb, sizeof(bitmap_super_t));
 	} else {
+		//We are not inheriting superblock, therefore we need to fully initialize the array
+
 		char *name = cfg_getstr(image->imagesec, "label");
 
 		/* constant array information - 128 bytes */
-		sb->magic = MD_SB_MAGIC;	/* MD_SB_MAGIC: 0xa92b4efc - little endian. This is actualy just char string saying "bitm" :-) */
+		sb->magic = MD_SB_MAGIC;	/* MD_SB_MAGIC: 0xa92b4efc - little endian. */
 		sb->major_version = 1;	/* 1 */
 		sb->feature_map = MD_FEATURE_BITMAP_OFFSET;	/* bit 0 set if 'bitmap_offset' is meaningful */
 		sb->pad0 = 0;		/* always set to 0 when writing */
@@ -229,10 +239,10 @@ static int mdraid_generate(struct image *image) {
 		//#define	WriteMostly1	1	/* mask for writemostly flag in above */
 		//#define	FailFast1	2	/* Should avoid retries and fixups and just fail */
 
-		/* Bad block log.  If there are any bad blocks the feature flag is set.
-		* If offset and size are non-zero, that space is reserved and available
-		*/
-	sb->bblog_shift = 9;    /* shift from sectors to block size */ //TODO: not sure why this is 9
+	/* Bad block log.  If there are any bad blocks the feature flag is set.
+	* If offset and size are non-zero, that space is reserved and available
+	*/
+	sb->bblog_shift = 9;    /* shift from sectors to badblock size, typicaly 9-12 (shift by 9 is equal to 512 sectors per badblock) */
 	sb->bblog_size = 8; /* number of sectors reserved for list */
 	sb->bblog_offset = sb->bitmap_offset+BITMAP_SECTORS_MAX+8;   /* sector offset from superblock to bblog, signed - not unsigned */
 
@@ -259,7 +269,7 @@ static int mdraid_generate(struct image *image) {
 	sb->sb_csum = calc_sb_1_csum(sb);
 
 	//Prepare bitmap superblock (bitmaps don't have checksums for performance reasons)
-	bsb->magic = BITMAP_MAGIC;        /*  0  BITMAP_MAGIC */
+	bsb->magic = BITMAP_MAGIC;        /*  0  BITMAP_MAGIC - This is actualy just char string saying "bitm" :-) */
 	bsb->version = 4;      /* v4 is compatible with mdraid v1.2,   4  the bitmap major for now, could change... */
 	memcpy(bsb->uuid, sb->set_uuid, sizeof(bsb->uuid));	/*  8  128 bit uuid - must match md device uuid */
 	//bsb->events = 0;       /* 24  event counter for the bitmap (1)*/
@@ -301,7 +311,7 @@ static int mdraid_generate(struct image *image) {
 	return 0;
 }
 
-static int mdraid_setup(struct image *image, cfg_t *cfg) {
+static int mdraid_parse(struct image *image, cfg_t *cfg) {
 	mdraid_img_t *md = xzalloc(sizeof(mdraid_img_t));
 	image->handler_priv = md;
 
@@ -316,55 +326,55 @@ static int mdraid_setup(struct image *image, cfg_t *cfg) {
 		return 1;
 	}
 
-	//Inherit config from master
-	char *inherit = cfg_getstr(image->imagesec, "inherit");
-	if (inherit) {
-		//Add inherit image as dependency (so it's built first)
-		struct partition *part;
-		part = xzalloc(sizeof *part);
-		part->image = inherit;
-		list_add_tail(&part->list, &image->partitions);
+	//Inherit config from parent
+	md->img_parent_part.image = cfg_getstr(image->imagesec, "parent");
+	if (md->img_parent_part.image) {
+		//Add parent partition as dependency (so it's built first)
+		list_add_tail(&md->img_parent_part.list, &image->partitions);
 
-		md->img_inherit = image_get(part->image);
-
-		if (md->img_inherit) {
-			image_info(image, "MDRAID will inherit array metadata config from: %s\n", part->image);
-		} else {
-			image_error(image, "MDRAID cannot find image config to inherit metadata from: %s\n", part->image);
+		//Find parent image
+		md->img_parent = image_get(md->img_parent_part.image);
+		if (!md->img_parent) {
+			image_error(image, "MDRAID cannot find parent image to inherit metadata config from: %s\n", md->img_parent_part.image);
 			return 9;
 		}
 
-		image->size = md->img_inherit->size;
+		//Inherit image size from parent
+		image_info(image, "MDRAID will inherit array metadata config from parent: %s\n", md->img_parent->file);
+		image->size = md->img_parent->size;
 	}
 
-	//Find data image to be put inside the array
-	md->img_data = NULL;
-	char *img_data_path;
-	if (md->img_inherit) {
-		img_data_path = cfg_getstr(md->img_inherit->imagesec, "image");
+	//Find data partition to be put inside the array
+	if (md->img_parent) {
+		md->img_data_part.image = cfg_getstr(md->img_parent->imagesec, "image");
 	} else {
-		img_data_path = cfg_getstr(image->imagesec, "image");
+		md->img_data_part.image = cfg_getstr(image->imagesec, "image");
 	}
-	if (img_data_path) {
-		//Add data image as dependency (so it's built first)
-		struct partition *part;
-		part = xzalloc(sizeof *part);
-		part->image = img_data_path;
-		list_add_tail(&part->list, &image->partitions);
 
-		if (part->image) {
-			image_info(image, "MDRAID using data from: %s\n", part->image);
-			md->img_data = image_get(part->image); //TODO: will this work for pre-existing images not generated by genimage???
-			if (!md->img_data) {
-				image_error(image, "MDRAID cannot get image definition: %s\n", part->image);
-				return 8;
-			}
-			if (image->size == 0)
-				image->size = roundup(md->img_data->size + DATA_OFFSET_BYTES, MDRAID_ALIGN_BYTES);
-			if (image->size < (md->img_data->size + DATA_OFFSET_BYTES)) {
-				image_error(image, "MDRAID image too small to fit %s\n", part->image);
-				return 3;
-			}
+	//Add data partition as dependency (so it's built first)
+	if (md->img_data_part.image) {
+		list_add_tail(&md->img_data_part.list, &image->partitions);
+	}
+
+	return 0;
+}
+
+static int mdraid_setup(struct image *image, cfg_t *cfg) {
+	mdraid_img_t *md = image->handler_priv;
+
+	//Find data image and its metadata if data partition exists
+	if (md->img_data_part.image) {
+		image_info(image, "MDRAID using data from: %s\n", md->img_data_part.image);
+		md->img_data = image_get(md->img_data_part.image);
+		if (!md->img_data) {
+			image_error(image, "MDRAID cannot get image definition: %s\n", md->img_data_part.image);
+			return 8;
+		}
+		if (image->size == 0)
+			image->size = roundup(md->img_data->size + DATA_OFFSET_BYTES, MDRAID_ALIGN_BYTES);
+		if (image->size < (md->img_data->size + DATA_OFFSET_BYTES)) {
+			image_error(image, "MDRAID image too small to fit %s\n", md->img_data->file);
+			return 3;
 		}
 	} else {
 		image_info(image, "MDRAID is created without data.\n");
@@ -388,14 +398,15 @@ static cfg_opt_t mdraid_opts[] = {
 	CFG_STR("raid-uuid", NULL, CFGF_NONE),
 	CFG_STR("disk-uuid", NULL, CFGF_NONE),
 	CFG_STR("image", NULL, CFGF_NONE),
-	CFG_STR("inherit", NULL, CFGF_NONE),
+	CFG_STR("parent", NULL, CFGF_NONE),
 	CFG_END()
 };
 
 struct image_handler mdraid_handler = {
 	.type = "mdraid",
 	.no_rootpath = cfg_true,
-	.generate = mdraid_generate,
+	.parse = mdraid_parse,
 	.setup = mdraid_setup,
+	.generate = mdraid_generate,
 	.opts = mdraid_opts,
 };
