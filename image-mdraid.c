@@ -182,7 +182,7 @@ static int mdraid_generate(struct image *image) {
 		/* constant array information - 128 bytes */
 		sb->magic = MD_SB_MAGIC;	/* MD_SB_MAGIC: 0xa92b4efc - little endian. This is actualy just char string saying "bitm" :-) */
 		sb->major_version = 1;	/* 1 */
-		sb->feature_map = MD_FEATURE_BITMAP_OFFSET;	/* bit 0 set if 'bitmap_offset' is meaningful */ //TODO: internal bitmap bit is ignored, unless there is correct bitmap with BITMAP_MAGIC in place
+		sb->feature_map = MD_FEATURE_BITMAP_OFFSET;	/* bit 0 set if 'bitmap_offset' is meaningful */
 		sb->pad0 = 0;		/* always set to 0 when writing */
 
 		char *raid_uuid = cfg_getstr(image->imagesec, "raid-uuid");
@@ -394,6 +394,7 @@ static cfg_opt_t mdraid_opts[] = {
 
 struct image_handler mdraid_handler = {
 	.type = "mdraid",
+	.no_rootpath = cfg_true,
 	.generate = mdraid_generate,
 	.setup = mdraid_setup,
 	.opts = mdraid_opts,
