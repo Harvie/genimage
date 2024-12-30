@@ -35,7 +35,6 @@ https://docs.huihoo.com/doxygen/linux/kernel/3.7/md__p_8h_source.html
 #include <stdio.h>
 #include <string.h>
 #include <time.h>
-#include <stdlib.h>
 #include <errno.h>
 #include <linux/raid/md_p.h>
 
@@ -307,10 +306,8 @@ static int mdraid_setup(struct image *image, cfg_t *cfg) {
 	image->handler_priv = md;
 
 	//Common MDRAID subsystem init
-	if (!mdraid_time) {
+	if (!mdraid_time)
 		mdraid_time = time(NULL);
-		srandom(mdraid_time); //For UUID generation
-	}
 
 	//Sanity checks
 	int raid_level = cfg_getint(image->imagesec, "level");
