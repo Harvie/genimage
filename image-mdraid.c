@@ -53,6 +53,7 @@ static time_t mdraid_time = 0; //Array creation timestamp has to be identical ac
  * (Currently it's missing from linux-libc-dev debian package, so cannot be simply included)
  */
 
+#ifndef BITMAP_MAGIC
 #define BITMAP_MAGIC 0x6d746962 /* This is actualy just char string saying "bitm" :-) */
 
 /* use these for bitmap->flags and bitmap->sb->state bit-fields */
@@ -94,6 +95,7 @@ typedef struct bitmap_super_s {
  *    resync happens across.  For raid1 and raid5/6 it is the size of individual
  *    devices.  For raid10 it is the size of the array.
  */
+#endif //BITMAP_MAGIC
 
 
 //This structure is used to store mdraid state data in handler_priv
